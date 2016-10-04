@@ -55,6 +55,13 @@ class Watcher(object):
         self.logger = logging.getLogger(self.logger_name)
         self.formatter = ColourFormatter("%(asctime)s  %(message)s")
 
+    def __enter__(self):
+        self.watch()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.stop()
+
     def watch(self, level=logging.INFO, out=stdout):
         self.stop()
         handler = logging.StreamHandler(out)
