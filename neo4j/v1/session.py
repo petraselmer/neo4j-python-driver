@@ -62,7 +62,7 @@ class GraphDatabase(object):
     """
 
     @staticmethod
-    def driver(url, **config):
+    def driver(uri, **config):
         """ Acquire a :class:`.Driver` instance for the given URL and
         configuration:
 
@@ -70,10 +70,16 @@ class GraphDatabase(object):
             >>> driver = GraphDatabase.driver("bolt://localhost")
 
         """
-        return Driver(url, **config)
+        parsed = urlparse(uri)
+        if parsed.scheme == "bolt":
+            host = parsed.hostname
+            port = parsed.port or DEFAULT_PORT
+            return DirectDriver(host, port, **config)
+        else:
+            raise ProtocolError("Only the 'bolt' URI scheme is supported [%s]" % uri)
 
 
-class Driver(object):
+class DirectDriver(object):
     """ A :class:`.Driver` is an accessor for a specific graph database
     resource. It provides both a template for sessions and a container
     for the session pool. All configuration and authentication settings
@@ -110,20 +116,7 @@ class Driver(object):
 
     """
 
-    def __init__(self, address, **config):
-        if "://" in address:
-            parsed = urlparse(address)
-            if parsed.scheme == "bolt":
-                host = parsed.hostname
-                port = parsed.port or DEFAULT_PORT
-            else:
-                raise ProtocolError("Only the 'bolt' URI scheme is supported [%s]" % address)
-        elif ":" in address:
-            host, port = address.split(":")
-            port = int(port)
-        else:
-            host = address
-            port = DEFAULT_PORT
+    def __init__(self, host, port, **config):
         self.address = (host, port)
         self.config = config
         self.max_pool_size = config.get("max_pool_size", DEFAULT_MAX_POOL_SIZE)
