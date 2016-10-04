@@ -19,7 +19,7 @@
 # limitations under the License.
 
 from behave import *
-from test.tck.resultparser import parse_values
+from tck.resultparser import parse_values
 
 from tck import tck_util
 

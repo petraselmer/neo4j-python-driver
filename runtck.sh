@@ -17,10 +17,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-pip install --upgrade -r tck/requirements.txt
-if [ "$1" == "" ]; then
-    python ./runtests.py --tck
-else
-    #Example: NEORUN_START_ARGS="-n 3.1 -p neo4j" python ./runtests.py --tests --examples --tck
-    NEORUN_START_ARGS="$1" python ./runtests.py --tck
-fi
+python -c "from tck.configure_feature_files import *; set_up()"
+neotest 3.1.0-M09 $(dirname "$0")/tck/run/ behave --format=progress --tags=-db --tags=-tls --tags=-fixed_session_pool tck
+python -c "from tck.configure_feature_files import *; clean_up()"

@@ -23,7 +23,7 @@ import random
 import string
 
 from behave import *
-from test.tck.resultparser import parse_values
+from tck.resultparser import parse_values
 
 from neo4j.v1 import compat
 from tck import tck_util

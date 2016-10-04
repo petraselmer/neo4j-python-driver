@@ -19,12 +19,15 @@
 # limitations under the License.
 
 
-from test.tck.test_value import TestValue
+from tck.test_value import TestValue
 
 from neo4j.v1 import GraphDatabase, basic_auth
 from tck.resultparser import parse_values_to_comparable
 
-driver = GraphDatabase.driver("bolt://localhost", auth=basic_auth("neo4j", "neo4j"), encrypted=False)
+BOLT_URI = "bolt://localhost:7687"
+AUTH_TOKEN = basic_auth("neotest", "neotest")
+
+driver = GraphDatabase.driver(BOLT_URI, auth=AUTH_TOKEN, encrypted=False)
 runners = []
 
 

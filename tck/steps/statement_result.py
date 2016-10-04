@@ -19,7 +19,7 @@
 # limitations under the License.
 
 from behave import *
-from test.tck.resultparser import parse_values_to_comparable
+from tck.resultparser import parse_values_to_comparable
 
 from neo4j.v1 import Record, ResultSummary
 from neo4j.v1.exceptions import ResultError
