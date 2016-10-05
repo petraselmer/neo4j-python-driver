@@ -37,6 +37,7 @@ from os.path import dirname, isfile
 from select import select
 from socket import create_connection, SHUT_RDWR, error as SocketError
 from struct import pack as struct_pack, unpack as struct_unpack, unpack_from as struct_unpack_from
+from threading import Lock
 
 from .constants import DEFAULT_USER_AGENT, KNOWN_HOSTS, MAGIC_PREAMBLE, TRUST_DEFAULT, TRUST_ON_FIRST_USE
 from .compat import hex2
@@ -200,14 +201,17 @@ class Response(object):
 
 
 class Connection(object):
-    """ Server connection through which all protocol messages
-    are sent and received. This class is designed for protocol
-    version 1.
+    """ Server connection for Bolt protocol v1.
+
+    A :class:`.Connection` should be constructed following a
+    successful Bolt handshake and takes the socket over which
+    the handshake was carried out.
 
     .. note:: logs at INFO level
     """
 
     def __init__(self, sock, **config):
+        self.address = sock.getpeername()
         self.defunct = False
         self.channel = ChunkChannel(sock)
         self.packer = Packer(self.channel)
@@ -360,6 +364,67 @@ class Connection(object):
                 log_info("~~ [CLOSE]")
             self.channel.socket.close()
             self.closed = True
+
+
+class ConnectionPool(object):
+
+    def __init__(self, connector):
+        self.connector = connector
+        self._connections = {}
+        self._lock = Lock()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+
+    def acquire(self, address):
+        with self._lock:
+            try:
+                active, inactive = self._connections[address]
+            except KeyError:
+                active, inactive = self._connections[address] = deque(), deque()
+            try:
+                connection = inactive.popleft()
+            except IndexError:
+                connection = self.connector(address)
+            active.append(connection)
+            return connection
+
+    def release(self, connection):
+        with self._lock:
+            try:
+                active, inactive = self._connections[connection.address]
+            except KeyError:
+                pass
+            else:
+                try:
+                    active.remove(connection)
+                except ValueError:
+                    pass
+                else:
+                    if connection not in inactive:
+                        connection.reset()
+                        inactive.append(connection)
+
+    def purge(self, address):
+        with self._lock:
+            try:
+                active, inactive = self._connections[address]
+            except KeyError:
+                pass
+            else:
+                for connection in inactive:
+                    connection.close()
+                del self._connections[address]
+
+    def close(self):
+        with self._lock:
+            for _, (active, inactive) in self._connections.items():
+                for connection in list(active) + list(inactive):
+                    connection.close()
+            self._connections.clear()
 
 
 class CertificateStore(object):

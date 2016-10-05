@@ -175,6 +175,9 @@ class DirectDriver(object):
         if session.healthy and len(pool) < self.max_pool_size and session not in pool:
             pool.appendleft(session)
 
+    def close(self):
+        pass
+
 
 class StatementResult(object):
     """ A handler for the result of Cypher statement execution.
