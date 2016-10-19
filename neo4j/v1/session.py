@@ -30,7 +30,9 @@ from __future__ import division
 from collections import deque
 import re
 
-from .bolt import connect, Response, RUN, PULL_ALL
+from neo4j.util import RoundRobinSet
+
+from .bolt import connect, Response, RUN, PULL_ALL, ConnectionPool
 from .compat import integer, string, urlparse
 from .constants import DEFAULT_PORT, ENCRYPTION_DEFAULT, TRUST_DEFAULT, TRUST_SIGNED_CERTIFICATES, ENCRYPTION_ON, \
     ENCRYPTION_NON_LOCAL
@@ -72,9 +74,9 @@ class GraphDatabase(object):
         """
         parsed = urlparse(uri)
         if parsed.scheme == "bolt":
-            host = parsed.hostname
-            port = parsed.port or DEFAULT_PORT
-            return DirectDriver(host, port, **config)
+            return DirectDriver((parsed.hostname, parsed.port or DEFAULT_PORT), **config)
+        elif parsed.scheme == "bolt+routing":
+            return RoutingDriver((parsed.hostname, parsed.port or DEFAULT_PORT), **config)
         else:
             raise ProtocolError("Only the 'bolt' URI scheme is supported [%s]" % uri)
 
@@ -116,11 +118,10 @@ class DirectDriver(object):
 
     """
 
-    def __init__(self, host, port, **config):
-        self.address = (host, port)
+    def __init__(self, address, **config):
+        host, port = self.address = address
         self.config = config
         self.max_pool_size = config.get("max_pool_size", DEFAULT_MAX_POOL_SIZE)
-        self.session_pool = deque()
         encrypted = config.get("encrypted", None)
         if encrypted is None:
             _warn_about_insecure_default()
@@ -140,6 +141,11 @@ class DirectDriver(object):
         else:
             self.ssl_context = None
 
+        def connector(address):
+            return connect(address, self.ssl_context, **self.config)
+
+        self.pool = ConnectionPool(connector)
+
     def session(self):
         """ Create a new session based on the graph database details
         specified within this driver:
@@ -152,7 +158,7 @@ class DirectDriver(object):
         connected = False
         while not connected:
             try:
-                session = self.session_pool.pop()
+                session = self.pool.acquire(self.address)
             except IndexError:
                 connection = connect(self.address, self.ssl_context, **self.config)
                 session = Session(self, connection)
@@ -168,7 +174,7 @@ class DirectDriver(object):
         :param session:
         :return:
         """
-        pool = self.session_pool
+        pool = self.pool
         for s in list(pool):  # freezing the pool into a list for iteration allows pool mutation inside the loop
             if not s.healthy:
                 pool.remove(s)
@@ -177,6 +183,32 @@ class DirectDriver(object):
 
     def close(self):
         pass
+
+
+# class RoutingDriver(object):
+#
+#     def __init__(self, seed_address, **config):
+#         self.routers = RoundRobinSet([seed_address])
+#         self.readers = RoundRobinSet()
+#         self.writers = RoundRobinSet()
+#         self.check_servers()
+#
+#     def expired(self):
+#         return True  # TODO
+#
+#     def check_servers(self):
+#         if (self.expired() or len(self.routers) < 1 or
+#                 len(self.readers) == 0 or len(self.writers) == 0):
+#             self._get_servers()
+#
+#     def _get_servers(self):
+#         success = False
+#         while self.routers and not success:
+#             address = self.routers.hop()
+#             success = self._call(address, )
+#
+#     def _call(self, address, procedure):
+
 
 
 class StatementResult(object):

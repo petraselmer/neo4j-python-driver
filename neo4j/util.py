@@ -19,6 +19,12 @@
 # limitations under the License.
 
 
+try:
+    from collections.abc import MutableSet
+except ImportError:
+    from collections import MutableSet, OrderedDict
+else:
+    from collections import OrderedDict
 import logging
 from sys import stdout
 
@@ -88,3 +94,47 @@ def watch(logger_name, level=logging.INFO, out=stdout):
     watcher = Watcher(logger_name)
     watcher.watch(level, out)
     return watcher
+
+
+class RoundRobinSet(MutableSet):
+
+    def __init__(self, iterable=()):
+        self._elements = OrderedDict(iterable)
+        self._current = None
+
+    def __repr__(self):
+        return repr(self._elements)
+
+    def __contains__(self, element):
+        return element in self._elements
+
+    def hop(self):
+        current = None
+        if self._elements:
+            if self._current is None:
+                self._current = 0
+            else:
+                self._current = (self._current + 1) % len(self._elements)
+            current = list(self._elements.keys())[self._current]
+        return current
+
+    def __iter__(self):
+        return iter(self._elements)
+
+    def __len__(self):
+        return len(self._elements)
+
+    def add(self, element):
+        self._elements[element] = None
+
+    def discard(self, element):
+        try:
+            del self._elements[element]
+        except KeyError:
+            pass
+
+    def remove(self, element):
+        try:
+            del self._elements[element]
+        except KeyError:
+            raise ValueError(element)
