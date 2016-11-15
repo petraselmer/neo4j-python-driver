@@ -43,6 +43,11 @@ class CypherError(Exception):
                 setattr(self, key, value)
 
 
+class TransactionError(Exception):
+    """ Raised when an error occurs while using a transaction.
+    """
+
+
 class ResultError(Exception):
     """ Raised when an error occurs while consuming a result.
     """

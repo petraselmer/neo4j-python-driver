@@ -395,17 +395,6 @@ class ConnectionPool(object):
         with self._lock:
             connection.in_use = False
 
-    def purge(self, address):
-        with self._lock:
-            try:
-                active, inactive = self._connections[address]
-            except KeyError:
-                pass
-            else:
-                for connection in inactive:
-                    connection.close()
-                del self._connections[address]
-
     def close(self):
         with self._lock:
             for _, connections in self._connections.items():

@@ -29,20 +29,19 @@ from __future__ import division
 
 from collections import deque
 import re
+from threading import Lock
 
 from neo4j.util import RoundRobinSet
 
 from .bolt import connect, Response, RUN, PULL_ALL, ConnectionPool
 from .compat import integer, string, urlparse
 from .constants import DEFAULT_PORT, ENCRYPTION_DEFAULT, TRUST_DEFAULT, TRUST_SIGNED_CERTIFICATES, \
-    ENCRYPTION_ON, ENCRYPTION_NON_LOCAL
-from .exceptions import CypherError, ProtocolError, ResultError
+    ENCRYPTION_ON, ENCRYPTION_NON_LOCAL, TRUST_ON_FIRST_USE, READ_ACCESS
+from .exceptions import CypherError, ProtocolError, ResultError, TransactionError
 from .ssl_compat import SSL_AVAILABLE, SSLContext, PROTOCOL_SSLv23, OP_NO_SSLv2, CERT_REQUIRED
 from .summary import ResultSummary
 from .types import hydrated
 
-
-DEFAULT_MAX_POOL_SIZE = 50
 
 localhost = re.compile(r"^(localhost|127(\.\d+){3})$", re.IGNORECASE)
 
@@ -71,6 +70,29 @@ class GraphDatabase(object):
             >>> from neo4j.v1 import GraphDatabase
             >>> driver = GraphDatabase.driver("bolt://localhost")
 
+        :param uri: URI for a graph database
+        :param config: configuration and authentication details (valid keys are listed below)
+
+            `auth`
+              An authentication token for the server, for example
+              ``basic_auth("neo4j", "password")``.
+
+            `der_encoded_server_certificate`
+              The server certificate in DER format, if required.
+
+            `encrypted`
+              Encryption level: one of :attr:`.ENCRYPTION_ON`, :attr:`.ENCRYPTION_OFF`
+              or :attr:`.ENCRYPTION_NON_LOCAL`. The default setting varies
+              depending on whether SSL is available or not. If it is,
+              :attr:`.ENCRYPTION_NON_LOCAL` is the default.
+
+            `trust`
+              Trust level: one of :attr:`.TRUST_ON_FIRST_USE` (default) or
+              :attr:`.TRUST_SIGNED_CERTIFICATES`.
+
+            `user_agent`
+              A custom user agent string, if required.
+
         """
         parsed = urlparse(uri)
         if parsed.scheme == "bolt":
@@ -81,47 +103,43 @@ class GraphDatabase(object):
             raise ProtocolError("Only the 'bolt' URI scheme is supported [%s]" % uri)
 
 
-class DirectDriver(object):
+class Driver(object):
     """ A :class:`.Driver` is an accessor for a specific graph database
-    resource. It provides both a template for sessions and a container
-    for the session pool. All configuration and authentication settings
-    are collected by the `Driver` constructor; should different settings
-    be required, a new `Driver` instance should be created.
+    resource. It is thread-safe, acts as a template for sessions and hosts
+    a connection pool.
 
-    :param address: address of the remote server as either a `bolt` URI
-                    or a `host:port` string
-    :param config: configuration and authentication details (valid keys are listed below)
+    All configuration and authentication settings are held immutably by the
+    `Driver`. Should different settings be required, a new `Driver` instance
+    should be created via the :meth:`.GraphDatabase.driver` method.
+    """
 
-        `auth`
-          An authentication token for the server, for example
-          ``basic_auth("neo4j", "password")``.
+    def __init__(self, connector):
+        self.pool = ConnectionPool(connector)
 
-        `der_encoded_server_certificate`
-          The server certificate in DER format, if required.
+    def __del__(self):
+        self.close()
 
-        `encrypted`
-          Encryption level: one of :attr:`.ENCRYPTION_ON`, :attr:`.ENCRYPTION_OFF`
-          or :attr:`.ENCRYPTION_NON_LOCAL`. The default setting varies
-          depending on whether SSL is available or not. If it is,
-          :attr:`.ENCRYPTION_NON_LOCAL` is the default.
+    def __enter__(self):
+        return self
 
-        `max_pool_size`
-          The maximum number of sessions to keep idle in the session
-          pool.
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.close()
 
-        `trust`
-          Trust level: one of :attr:`.TRUST_ON_FIRST_USE` (default) or
-          :attr:`.TRUST_SIGNED_CERTIFICATES`.
+    def session(self, access_mode=None):
+        raise NotImplementedError()
 
-        `user_agent`
-          A custom user agent string, if required.
+    def close(self):
+        self.pool.close()
 
+
+class DirectDriver(Driver):
+    """ A :class:`.DirectDriver` is created from a `bolt` URI and addresses
+    a single database instance.
     """
 
     def __init__(self, address, **config):
         host, port = self.address = address
         self.config = config
-        self.max_pool_size = config.get("max_pool_size", DEFAULT_MAX_POOL_SIZE)
         encrypted = config.get("encrypted", None)
         if encrypted is None:
             _warn_about_insecure_default()
@@ -138,26 +156,65 @@ class DirectDriver(object):
             if trust >= TRUST_SIGNED_CERTIFICATES:
                 ssl_context.verify_mode = CERT_REQUIRED
             ssl_context.set_default_verify_paths()
-            self.ssl_context = ssl_context
         else:
-            self.ssl_context = None
+            ssl_context = None
+        Driver.__init__(self, lambda a: connect(a, ssl_context, **self.config))
 
-        def connector(address_):
-            return connect(address_, self.ssl_context, **self.config)
-
-        self.pool = ConnectionPool(connector)
-
-    def __del__(self):
-        self.close()
-
-    def session(self):
+    def session(self, access_mode=None):
         """ Create a new session based on the graph database details
         specified within this driver:
         """
-        return Session(self, self.pool.acquire(self.address))
+        return Session(self.pool.acquire(self.address))
 
-    def close(self):
-        self.pool.close()
+
+class RoutingDriver(Driver):
+    """ A :class:`.RoutingDriver` is created from a `bolt+routing` URI.
+    """
+
+    def __init__(self, address, **config):
+        host, port = self.address = address
+        self.config = config
+        encrypted = config.get("encrypted", None)
+        if encrypted is None:
+            _warn_about_insecure_default()
+            encrypted = ENCRYPTION_DEFAULT
+        self.encrypted = encrypted
+        self.trust = trust = config.get("trust", TRUST_DEFAULT)
+        if trust == TRUST_ON_FIRST_USE:
+            raise RuntimeError("'Trust On First Use' is not compatible with routing")
+        if encrypted == ENCRYPTION_ON or \
+           encrypted == ENCRYPTION_NON_LOCAL and not localhost.match(host):
+            if not SSL_AVAILABLE:
+                raise RuntimeError("Bolt over TLS is only available in Python 2.7.9+ and "
+                                   "Python 3.3+")
+            ssl_context = SSLContext(PROTOCOL_SSLv23)
+            ssl_context.options |= OP_NO_SSLv2
+            if trust >= TRUST_SIGNED_CERTIFICATES:
+                ssl_context.verify_mode = CERT_REQUIRED
+            ssl_context.set_default_verify_paths()
+        else:
+            ssl_context = None
+        Driver.__init__(self, lambda a: connect(a, ssl_context, **self.config))
+        self._lock = Lock()
+        self._routers = RoundRobinSet([address])
+        self._readers = RoundRobinSet()
+        self._writers = RoundRobinSet()
+        self._discover()
+
+    def _discover(self):
+        with self._lock:
+            address = next(self._routers)
+            self._readers.clear()
+            self._readers.add(address)
+            self._writers.clear()
+            self._writers.add(address)
+
+    def session(self, access_mode=None):
+        if access_mode == READ_ACCESS:
+            address = next(self._readers)
+        else:
+            address = next(self._writers)
+        return Session(self.pool.acquire(address))
 
 
 class StatementResult(object):
@@ -284,10 +341,12 @@ class Session(object):
     method.
     """
 
-    def __init__(self, driver, connection):
-        self.driver = driver
+    def __init__(self, connection):
         self.connection = connection
         self.transaction = None
+
+    def __del__(self):
+        self.close()
 
     def __enter__(self):
         return self
@@ -296,7 +355,7 @@ class Session(object):
         self.close()
 
     def run(self, statement, parameters=None):
-        """ Run a parameterised Cypher statement.
+        """ Run a parameterised Cypher statement in an auto-commit transaction.
 
         :param statement: Cypher statement to execute
         :param parameters: dictionary of parameters
@@ -304,20 +363,19 @@ class Session(object):
         :rtype: :class:`.StatementResult`
         """
         if self.transaction:
-            raise ProtocolError("Statements cannot be run directly on a session with an open "
-                                "transaction; either run from within the transaction or use a "
-                                "different session.")
+            raise TransactionError("Explicit transaction already open")
         return run(self.connection, statement, parameters)
 
     def close(self):
-        """ Recycle this session through the driver it came from.
+        """ Close the session.
         """
-        if self.connection and not self.connection.closed:
-            self.connection.fetch_all()
         if self.transaction:
             self.transaction.close()
-        self.connection.in_use = False
-        self.connection = None
+        if self.connection:
+            if not self.connection.closed:
+                self.connection.fetch_all()
+            self.connection.in_use = False
+            self.connection = None
 
     def begin_transaction(self):
         """ Create a new :class:`.Transaction` within this session.
@@ -325,9 +383,7 @@ class Session(object):
         :return: new :class:`.Transaction` instance.
         """
         if self.transaction:
-            raise ProtocolError("You cannot begin a transaction on a session with an open "
-                                "transaction; either run from within the transaction or use a "
-                                "different session.")
+            raise TransactionError("Explicit transaction already open")
 
         def clear_transaction():
             self.transaction = None

@@ -99,7 +99,7 @@ def watch(logger_name, level=logging.INFO, out=stdout):
 class RoundRobinSet(MutableSet):
 
     def __init__(self, iterable=()):
-        self._elements = OrderedDict(iterable)
+        self._elements = OrderedDict.fromkeys(iterable)
         self._current = None
 
     def __repr__(self):
@@ -108,7 +108,7 @@ class RoundRobinSet(MutableSet):
     def __contains__(self, element):
         return element in self._elements
 
-    def hop(self):
+    def __next__(self):
         current = None
         if self._elements:
             if self._current is None:
@@ -126,6 +126,9 @@ class RoundRobinSet(MutableSet):
 
     def add(self, element):
         self._elements[element] = None
+
+    def clear(self):
+        self._elements.clear()
 
     def discard(self, element):
         try:
