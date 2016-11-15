@@ -39,56 +39,29 @@ AUTH_TOKEN = basic_auth("neotest", "neotest")
 
 class DriverTestCase(ServerTestCase):
 
-    def test_healthy_session_will_be_returned_to_the_pool_on_close(self):
-        driver = GraphDatabase.driver(BOLT_URI, auth=AUTH_TOKEN)
-        assert len(driver.session_pool) == 0
-        driver.session().close()
-        assert len(driver.session_pool) == 1
-
-    def test_unhealthy_session_will_not_be_returned_to_the_pool_on_close(self):
-        driver = GraphDatabase.driver(BOLT_URI, auth=AUTH_TOKEN)
-        assert len(driver.session_pool) == 0
-        session = driver.session()
-        session.connection.defunct = True
-        session.close()
-        assert len(driver.session_pool) == 0
-
-    def session_pool_cannot_exceed_max_size(self):
-        driver = GraphDatabase.driver(BOLT_URI, auth=AUTH_TOKEN, max_pool_size=1)
-        assert len(driver.session_pool) == 0
-        driver.session().close()
-        assert len(driver.session_pool) == 1
-        driver.session().close()
-        assert len(driver.session_pool) == 1
-
-    def test_session_that_dies_in_the_pool_will_not_be_given_out(self):
-        driver = GraphDatabase.driver(BOLT_URI, auth=AUTH_TOKEN)
-        session_1 = driver.session()
-        session_1.close()
-        assert len(driver.session_pool) == 1
-        session_1.connection.close()
-        session_2 = driver.session()
-        assert session_2 is not session_1
-
     def test_must_use_valid_url_scheme(self):
         with self.assertRaises(ProtocolError):
             GraphDatabase.driver("x://xxx", auth=AUTH_TOKEN)
 
-    def test_sessions_are_reused(self):
+    def test_connections_are_reused(self):
         driver = GraphDatabase.driver(BOLT_URI, auth=AUTH_TOKEN)
         session_1 = driver.session()
+        connection_1 = session_1.connection
         session_1.close()
         session_2 = driver.session()
+        connection_2 = session_2.connection
         session_2.close()
-        assert session_1 is session_2
+        assert connection_1 is connection_2
 
-    def test_sessions_are_not_reused_if_still_in_use(self):
+    def test_connections_are_not_shared_between_sessions(self):
         driver = GraphDatabase.driver(BOLT_URI, auth=AUTH_TOKEN)
         session_1 = driver.session()
         session_2 = driver.session()
-        session_2.close()
-        session_1.close()
-        assert session_1 is not session_2
+        try:
+            assert session_1.connection is not session_2.connection
+        finally:
+            session_1.close()
+            session_2.close()
 
     def test_fail_nicely_when_connecting_to_http_port(self):
         driver = GraphDatabase.driver("bolt://localhost:7474", auth=AUTH_TOKEN, encrypted=False)
@@ -97,7 +70,6 @@ class DriverTestCase(ServerTestCase):
 
         assert str(context.exception) == "Server responded HTTP. Make sure you are not trying to connect to the http " \
                                     "endpoint (HTTP defaults to port 7474 whereas BOLT defaults to port 7687)"
-
 
 
 class SecurityTestCase(ServerTestCase):

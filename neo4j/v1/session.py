@@ -34,8 +34,8 @@ from neo4j.util import RoundRobinSet
 
 from .bolt import connect, Response, RUN, PULL_ALL, ConnectionPool
 from .compat import integer, string, urlparse
-from .constants import DEFAULT_PORT, ENCRYPTION_DEFAULT, TRUST_DEFAULT, TRUST_SIGNED_CERTIFICATES, ENCRYPTION_ON, \
-    ENCRYPTION_NON_LOCAL
+from .constants import DEFAULT_PORT, ENCRYPTION_DEFAULT, TRUST_DEFAULT, TRUST_SIGNED_CERTIFICATES, \
+    ENCRYPTION_ON, ENCRYPTION_NON_LOCAL
 from .exceptions import CypherError, ProtocolError, ResultError
 from .ssl_compat import SSL_AVAILABLE, SSLContext, PROTOCOL_SSLv23, OP_NO_SSLv2, CERT_REQUIRED
 from .summary import ResultSummary
@@ -131,7 +131,8 @@ class DirectDriver(object):
         if encrypted == ENCRYPTION_ON or \
            encrypted == ENCRYPTION_NON_LOCAL and not localhost.match(host):
             if not SSL_AVAILABLE:
-                raise RuntimeError("Bolt over TLS is only available in Python 2.7.9+ and Python 3.3+")
+                raise RuntimeError("Bolt over TLS is only available in Python 2.7.9+ and "
+                                   "Python 3.3+")
             ssl_context = SSLContext(PROTOCOL_SSLv23)
             ssl_context.options |= OP_NO_SSLv2
             if trust >= TRUST_SIGNED_CERTIFICATES:
@@ -141,74 +142,22 @@ class DirectDriver(object):
         else:
             self.ssl_context = None
 
-        def connector(address):
-            return connect(address, self.ssl_context, **self.config)
+        def connector(address_):
+            return connect(address_, self.ssl_context, **self.config)
 
         self.pool = ConnectionPool(connector)
+
+    def __del__(self):
+        self.close()
 
     def session(self):
         """ Create a new session based on the graph database details
         specified within this driver:
-
-            >>> from neo4j.v1 import GraphDatabase
-            >>> driver = GraphDatabase.driver("bolt://localhost")
-            >>> session = driver.session()
         """
-        session = None
-        connected = False
-        while not connected:
-            try:
-                session = self.pool.acquire(self.address)
-            except IndexError:
-                connection = connect(self.address, self.ssl_context, **self.config)
-                session = Session(self, connection)
-                connected = True
-            else:
-                if session.healthy:
-                    connected = session.healthy
-        return session
-
-    def recycle(self, session):
-        """ Accept a session for recycling, if healthy.
-
-        :param session:
-        :return:
-        """
-        pool = self.pool
-        for s in list(pool):  # freezing the pool into a list for iteration allows pool mutation inside the loop
-            if not s.healthy:
-                pool.remove(s)
-        if session.healthy and len(pool) < self.max_pool_size and session not in pool:
-            pool.appendleft(session)
+        return Session(self, self.pool.acquire(self.address))
 
     def close(self):
-        pass
-
-
-# class RoutingDriver(object):
-#
-#     def __init__(self, seed_address, **config):
-#         self.routers = RoundRobinSet([seed_address])
-#         self.readers = RoundRobinSet()
-#         self.writers = RoundRobinSet()
-#         self.check_servers()
-#
-#     def expired(self):
-#         return True  # TODO
-#
-#     def check_servers(self):
-#         if (self.expired() or len(self.routers) < 1 or
-#                 len(self.readers) == 0 or len(self.writers) == 0):
-#             self._get_servers()
-#
-#     def _get_servers(self):
-#         success = False
-#         while self.routers and not success:
-#             address = self.routers.hop()
-#             success = self._call(address, )
-#
-#     def _call(self, address, procedure):
-
+        self.pool.close()
 
 
 class StatementResult(object):
@@ -309,7 +258,8 @@ class StatementResult(object):
         if num_records == 0:
             raise ResultError("Cannot retrieve a single record, because this result is empty.")
         elif num_records != 1:
-            raise ResultError("Expected a result with a single record, but this result contains at least one more.")
+            raise ResultError("Expected a result with a single record, but this result contains "
+                              "at least one more.")
         else:
             return records[0]
 
@@ -345,13 +295,6 @@ class Session(object):
     def __exit__(self, exc_type, exc_value, traceback):
         self.close()
 
-    @property
-    def healthy(self):
-        """ Return ``True`` if this session is healthy, ``False`` if
-        unhealthy and ``None`` if closed.
-        """
-        return self.connection.healthy
-
     def run(self, statement, parameters=None):
         """ Run a parameterised Cypher statement.
 
@@ -361,8 +304,9 @@ class Session(object):
         :rtype: :class:`.StatementResult`
         """
         if self.transaction:
-            raise ProtocolError("Statements cannot be run directly on a session with an open transaction;"
-                                " either run from within the transaction or use a different session.")
+            raise ProtocolError("Statements cannot be run directly on a session with an open "
+                                "transaction; either run from within the transaction or use a "
+                                "different session.")
         return run(self.connection, statement, parameters)
 
     def close(self):
@@ -372,7 +316,8 @@ class Session(object):
             self.connection.fetch_all()
         if self.transaction:
             self.transaction.close()
-        self.driver.recycle(self)
+        self.connection.in_use = False
+        self.connection = None
 
     def begin_transaction(self):
         """ Create a new :class:`.Transaction` within this session.
@@ -380,8 +325,9 @@ class Session(object):
         :return: new :class:`.Transaction` instance.
         """
         if self.transaction:
-            raise ProtocolError("You cannot begin a transaction on a session with an open transaction;"
-                                " either run from within the transaction or use a different session.")
+            raise ProtocolError("You cannot begin a transaction on a session with an open "
+                                "transaction; either run from within the transaction or use a "
+                                "different session.")
 
         def clear_transaction():
             self.transaction = None

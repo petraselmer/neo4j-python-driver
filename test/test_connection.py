@@ -26,6 +26,9 @@ from test.util import ServerTestCase
 
 class QuickConnection(object):
 
+    closed = False
+    defunct = False
+
     def __init__(self, socket):
         self.socket = socket
         self.address = socket.getpeername()
@@ -44,13 +47,13 @@ def connector(address):
 
 def assert_pool_size(pool, address, expected_active, expected_inactive):
     try:
-        active, inactive = pool._connections[address]
+        connections = pool._connections[address]
     except KeyError:
         assert 0 == expected_active
         assert 0 == expected_inactive
     else:
-        assert len(active) == expected_active
-        assert len(inactive) == expected_inactive
+        assert len([c for c in connections if c.in_use]) == expected_active
+        assert len([c for c in connections if not c.in_use]) == expected_inactive
 
 
 class ConnectionPoolTestCase(ServerTestCase):
@@ -99,22 +102,3 @@ class ConnectionPoolTestCase(ServerTestCase):
             assert_pool_size(pool, address, 0, 1)
             pool.release(connection)
             assert_pool_size(pool, address, 0, 1)
-
-    def test_releasing_non_pooled_connection(self):
-        with ConnectionPool(connector) as pool:
-            address = ("127.0.0.1", 7687)
-            connection = connector(address)
-            assert_pool_size(pool, address, 0, 0)
-            pool.release(connection)
-            assert_pool_size(pool, address, 0, 0)
-            connection.close()
-
-    def test_releasing_non_pooled_connection_when_similar_connections_exist(self):
-        with ConnectionPool(connector) as pool:
-            address = ("127.0.0.1", 7687)
-            pool.acquire(address)
-            connection_2 = connector(address)
-            assert_pool_size(pool, address, 1, 0)
-            pool.release(connection_2)
-            assert_pool_size(pool, address, 1, 0)
-            connection_2.close()

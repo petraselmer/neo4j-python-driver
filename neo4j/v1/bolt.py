@@ -212,11 +212,12 @@ class Connection(object):
 
     def __init__(self, sock, **config):
         self.address = sock.getpeername()
-        self.defunct = False
         self.channel = ChunkChannel(sock)
         self.packer = Packer(self.channel)
         self.responses = deque()
+        self.in_use = False
         self.closed = False
+        self.defunct = False
 
         # Determine the user agent and ensure it is a Unicode value
         user_agent = config.get("user_agent", DEFAULT_USER_AGENT)
@@ -248,13 +249,6 @@ class Connection(object):
 
     def __del__(self):
         self.close()
-
-    @property
-    def healthy(self):
-        """ Return ``True`` if this connection is healthy, ``False`` if
-        unhealthy and ``None`` if closed.
-        """
-        return None if self.closed else not self.defunct
 
     def append(self, signature, fields=(), response=None):
         """ Add a message to the outgoing queue.
@@ -382,31 +376,24 @@ class ConnectionPool(object):
     def acquire(self, address):
         with self._lock:
             try:
-                active, inactive = self._connections[address]
+                connections = self._connections[address]
             except KeyError:
-                active, inactive = self._connections[address] = deque(), deque()
-            try:
-                connection = inactive.popleft()
-            except IndexError:
-                connection = self.connector(address)
-            active.append(connection)
+                connections = self._connections[address] = deque()
+            for connection in list(connections):
+                if connection.closed or connection.defunct:
+                    connections.remove(connection)
+                    continue
+                if not connection.in_use:
+                    connection.in_use = True
+                    return connection
+            connection = self.connector(address)
+            connection.in_use = True
+            connections.append(connection)
             return connection
 
     def release(self, connection):
         with self._lock:
-            try:
-                active, inactive = self._connections[connection.address]
-            except KeyError:
-                pass
-            else:
-                try:
-                    active.remove(connection)
-                except ValueError:
-                    pass
-                else:
-                    if connection not in inactive:
-                        connection.reset()
-                        inactive.append(connection)
+            connection.in_use = False
 
     def purge(self, address):
         with self._lock:
@@ -421,9 +408,12 @@ class ConnectionPool(object):
 
     def close(self):
         with self._lock:
-            for _, (active, inactive) in self._connections.items():
-                for connection in list(active) + list(inactive):
-                    connection.close()
+            for _, connections in self._connections.items():
+                for connection in connections:
+                    try:
+                        connection.close()
+                    except IOError:
+                        pass
             self._connections.clear()
 
 
