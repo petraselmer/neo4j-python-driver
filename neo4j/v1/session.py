@@ -30,13 +30,15 @@ from __future__ import division
 from collections import deque
 import re
 from threading import Lock
+from warnings import warn
 
 from neo4j.util import RoundRobinSet
 
 from .bolt import connect, Response, RUN, PULL_ALL, ConnectionPool
 from .compat import integer, string, urlparse
 from .constants import DEFAULT_PORT, ENCRYPTION_DEFAULT, TRUST_DEFAULT, TRUST_SIGNED_CERTIFICATES, \
-    ENCRYPTION_ON, ENCRYPTION_NON_LOCAL, TRUST_ON_FIRST_USE, READ_ACCESS
+    ENCRYPTION_ON, TRUST_ON_FIRST_USE, READ_ACCESS, TRUST_SYSTEM_CA_SIGNED_CERTIFICATES, \
+    TRUST_ALL_CERTIFICATES, TRUST_CUSTOM_CA_SIGNED_CERTIFICATES
 from .exceptions import CypherError, ProtocolError, ResultError, TransactionError
 from .ssl_compat import SSL_AVAILABLE, SSLContext, PROTOCOL_SSLv23, OP_NO_SSLv2, CERT_REQUIRED
 from .summary import ResultSummary
@@ -103,6 +105,49 @@ class GraphDatabase(object):
             raise ProtocolError("Only the 'bolt' URI scheme is supported [%s]" % uri)
 
 
+class SecurityPlan(object):
+
+    @classmethod
+    def build(cls, address, **config):
+        encrypted = config.get("encrypted", None)
+        if encrypted is None:
+            encrypted = _encryption_default()
+        trust = config.get("trust", TRUST_DEFAULT)
+        if encrypted:
+            if not SSL_AVAILABLE:
+                raise RuntimeError("Bolt over TLS is only available in Python 2.7.9+ and "
+                                   "Python 3.3+")
+            ssl_context = SSLContext(PROTOCOL_SSLv23)
+            ssl_context.options |= OP_NO_SSLv2
+            if trust == TRUST_ON_FIRST_USE:
+                warn("TRUST_ON_FIRST_USE is deprecated, please use "
+                     "TRUST_ALL_CERTIFICATES instead")
+            elif trust == TRUST_SIGNED_CERTIFICATES:
+                warn("TRUST_SIGNED_CERTIFICATES is deprecated, please use "
+                     "TRUST_SYSTEM_CA_SIGNED_CERTIFICATES instead")
+                ssl_context.verify_mode = CERT_REQUIRED
+            elif trust == TRUST_ALL_CERTIFICATES:
+                pass
+            elif trust == TRUST_CUSTOM_CA_SIGNED_CERTIFICATES:
+                raise NotImplementedError("Custom CA support is not implemented")
+            elif trust == TRUST_SYSTEM_CA_SIGNED_CERTIFICATES:
+                ssl_context.verify_mode = CERT_REQUIRED
+            else:
+                raise ValueError("Unknown trust mode")
+            ssl_context.set_default_verify_paths()
+        else:
+            ssl_context = None
+        return cls(encrypted, ssl_context, trust != TRUST_ON_FIRST_USE)
+
+    def __init__(self, requires_encryption, ssl_context, routing_compatible):
+        self.encrypted = bool(requires_encryption)
+        self.ssl_context = ssl_context
+        self.routing_compatible = routing_compatible
+
+    def __repr__(self):
+        return repr(vars(self))
+
+
 class Driver(object):
     """ A :class:`.Driver` is an accessor for a specific graph database
     resource. It is thread-safe, acts as a template for sessions and hosts
@@ -138,27 +183,10 @@ class DirectDriver(Driver):
     """
 
     def __init__(self, address, **config):
-        host, port = self.address = address
-        self.config = config
-        encrypted = config.get("encrypted", None)
-        if encrypted is None:
-            _warn_about_insecure_default()
-            encrypted = ENCRYPTION_DEFAULT
-        self.encrypted = encrypted
-        self.trust = trust = config.get("trust", TRUST_DEFAULT)
-        if encrypted == ENCRYPTION_ON or \
-           encrypted == ENCRYPTION_NON_LOCAL and not localhost.match(host):
-            if not SSL_AVAILABLE:
-                raise RuntimeError("Bolt over TLS is only available in Python 2.7.9+ and "
-                                   "Python 3.3+")
-            ssl_context = SSLContext(PROTOCOL_SSLv23)
-            ssl_context.options |= OP_NO_SSLv2
-            if trust >= TRUST_SIGNED_CERTIFICATES:
-                ssl_context.verify_mode = CERT_REQUIRED
-            ssl_context.set_default_verify_paths()
-        else:
-            ssl_context = None
-        Driver.__init__(self, lambda a: connect(a, ssl_context, **self.config))
+        self.address = address
+        self.security_plan = security_plan = SecurityPlan.build(address, **config)
+        self.encrypted = security_plan.encrypted
+        Driver.__init__(self, lambda a: connect(a, security_plan.ssl_context, **config))
 
     def session(self, access_mode=None):
         """ Create a new session based on the graph database details
@@ -172,36 +200,21 @@ class RoutingDriver(Driver):
     """
 
     def __init__(self, address, **config):
-        host, port = self.address = address
-        self.config = config
-        encrypted = config.get("encrypted", None)
-        if encrypted is None:
-            _warn_about_insecure_default()
-            encrypted = ENCRYPTION_DEFAULT
-        self.encrypted = encrypted
-        self.trust = trust = config.get("trust", TRUST_DEFAULT)
-        if trust == TRUST_ON_FIRST_USE:
-            raise RuntimeError("'Trust On First Use' is not compatible with routing")
-        if encrypted == ENCRYPTION_ON or \
-           encrypted == ENCRYPTION_NON_LOCAL and not localhost.match(host):
-            if not SSL_AVAILABLE:
-                raise RuntimeError("Bolt over TLS is only available in Python 2.7.9+ and "
-                                   "Python 3.3+")
-            ssl_context = SSLContext(PROTOCOL_SSLv23)
-            ssl_context.options |= OP_NO_SSLv2
-            if trust >= TRUST_SIGNED_CERTIFICATES:
-                ssl_context.verify_mode = CERT_REQUIRED
-            ssl_context.set_default_verify_paths()
-        else:
-            ssl_context = None
-        Driver.__init__(self, lambda a: connect(a, ssl_context, **self.config))
+        self.address = address
+        self.security_plan = security_plan = SecurityPlan.build(address, **config)
+        self.encrypted = security_plan.encrypted
+        if not security_plan.routing_compatible:
+            # this error message is case-specific as there is only one incompatible
+            # scenario right now
+            raise RuntimeError("TRUST_ON_FIRST_USE is not compatible with routing")
+        Driver.__init__(self, lambda a: connect(a, security_plan.ssl_context, **config))
         self._lock = Lock()
         self._routers = RoundRobinSet([address])
         self._readers = RoundRobinSet()
         self._writers = RoundRobinSet()
-        self._discover()
+        self.discover()
 
-    def _discover(self):
+    def discover(self):
         with self._lock:
             address = next(self._routers)
             self._readers.clear()
@@ -588,10 +601,10 @@ def run(connection, statement, parameters=None):
 _warned_about_insecure_default = False
 
 
-def _warn_about_insecure_default():
+def _encryption_default():
     global _warned_about_insecure_default
     if not SSL_AVAILABLE and not _warned_about_insecure_default:
-        from warnings import warn
         warn("Bolt over TLS is only available in Python 2.7.9+ and Python 3.3+ "
              "so communications are not secure")
         _warned_about_insecure_default = True
+    return ENCRYPTION_DEFAULT
