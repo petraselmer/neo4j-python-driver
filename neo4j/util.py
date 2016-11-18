@@ -98,12 +98,12 @@ def watch(logger_name, level=logging.INFO, out=stdout):
 
 class RoundRobinSet(MutableSet):
 
-    def __init__(self, iterable=()):
-        self._elements = OrderedDict.fromkeys(iterable)
+    def __init__(self, elements=()):
+        self._elements = OrderedDict.fromkeys(elements)
         self._current = None
 
     def __repr__(self):
-        return repr(self._elements)
+        return "{%s}" % ", ".join(map(repr, self._elements))
 
     def __contains__(self, element):
         return element in self._elements
@@ -141,3 +141,11 @@ class RoundRobinSet(MutableSet):
             del self._elements[element]
         except KeyError:
             raise ValueError(element)
+
+    def update(self, elements=()):
+        self._elements.update(OrderedDict.fromkeys(elements))
+
+    def replace(self, elements=()):
+        e = self._elements
+        e.clear()
+        e.update(OrderedDict.fromkeys(elements))

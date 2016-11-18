@@ -30,6 +30,7 @@ from __future__ import division
 from collections import deque
 import re
 from threading import Lock
+from time import monotonic
 from warnings import warn
 
 from neo4j.util import RoundRobinSet
@@ -37,7 +38,7 @@ from neo4j.util import RoundRobinSet
 from .bolt import connect, Response, RUN, PULL_ALL, ConnectionPool
 from .compat import integer, string, urlparse
 from .constants import DEFAULT_PORT, ENCRYPTION_DEFAULT, TRUST_DEFAULT, TRUST_SIGNED_CERTIFICATES, \
-    ENCRYPTION_ON, TRUST_ON_FIRST_USE, READ_ACCESS, TRUST_SYSTEM_CA_SIGNED_CERTIFICATES, \
+    TRUST_ON_FIRST_USE, READ_ACCESS, TRUST_SYSTEM_CA_SIGNED_CERTIFICATES, \
     TRUST_ALL_CERTIFICATES, TRUST_CUSTOM_CA_SIGNED_CERTIFICATES
 from .exceptions import CypherError, ProtocolError, ResultError, TransactionError
 from .ssl_compat import SSL_AVAILABLE, SSLContext, PROTOCOL_SSLv23, OP_NO_SSLv2, CERT_REQUIRED
@@ -209,6 +210,7 @@ class RoutingDriver(Driver):
             raise RuntimeError("TRUST_ON_FIRST_USE is not compatible with routing")
         Driver.__init__(self, lambda a: connect(a, security_plan.ssl_context, **config))
         self._lock = Lock()
+        self._expiry_time = None
         self._routers = RoundRobinSet([address])
         self._readers = RoundRobinSet()
         self._writers = RoundRobinSet()
@@ -216,11 +218,24 @@ class RoutingDriver(Driver):
 
     def discover(self):
         with self._lock:
-            address = next(self._routers)
-            self._readers.clear()
-            self._readers.add(address)
-            self._writers.clear()
-            self._writers.add(address)
+            for router in list(self._routers):
+                session = Session(self.pool.acquire(router))
+                try:
+                    record = session.run("CALL dbms.cluster.routing.getServers").single()
+                except ResultError:
+                    raise RuntimeError("TODO")
+                new_expiry_time = monotonic() + record["ttl"]
+                servers = record["servers"]
+                new_routers = [s["addresses"] for s in servers if s["role"] == "ROUTE"][0]
+                new_readers = [s["addresses"] for s in servers if s["role"] == "READ"][0]
+                new_writers = [s["addresses"] for s in servers if s["role"] == "WRITE"][0]
+                if new_routers and new_readers and new_writers:
+                    self._expiry_time = new_expiry_time
+                    self._routers.replace(new_routers)
+                    self._readers.replace(new_readers)
+                    self._writers.replace(new_writers)
+                else:
+                    raise RuntimeError("TODO")
 
     def session(self, access_mode=None):
         if access_mode == READ_ACCESS:
@@ -312,12 +327,18 @@ class StatementResult(object):
             self.connection = None
 
     def consume(self):
-        """ Consume the remainder of this result and return the
-        summary.
+        """ Consume the remainder of this result and return the summary.
         """
         if self.connection and not self.connection.closed:
             list(self)
             self.connection = None
+        return self._summary
+
+    @property
+    def summary(self):
+        """ Return the summary, buffering any remaining records.
+        """
+        self.buffer()
         return self._summary
 
     def single(self):
